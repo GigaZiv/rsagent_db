@@ -1,0 +1,4 @@
+aioboto3
+sqlalchemy>=2.0.0
+asyncpg
+redis>=5.0.0
