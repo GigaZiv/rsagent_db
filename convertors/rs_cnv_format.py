@@ -77,7 +77,7 @@ def parse_rosreestr_xml(file_path: str, tag: str) -> dict[str, Any]:
         tree = ET.parse(file_path)
         root = tree.getroot()
 
-    except StopIteration:
+    except StopIteration as e:
         logger.error("Ошибка: XML-файл абсолютно пустой")
         return {'error': str(e)}
 
