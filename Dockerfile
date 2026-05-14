@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip setuptool
     pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 COPY utils/ /rsagent_db/utils/
+COPY convertors/ /rsagent_db/convertors/
 COPY rsagent_db.py .
 COPY health_check.py .
 

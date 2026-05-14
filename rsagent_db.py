@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import random
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import aioboto3
@@ -17,6 +18,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from convertors.rs_cnv_format import parse_rosreestr_xml
 from utils.rs_env import rs_settings
 from utils.rs_i18n import _
 from utils.rs_logger import get_logger
@@ -25,8 +27,8 @@ rs_settings.load_env_file()
 
 logger = get_logger("RSAgentDB")
 
-REDIS_URL: str | None = os.getenv("REDIS_URL")
-QUEUE_NAME: str | None = os.getenv("QUEUE_NAME")
+REDIS_URL: str = os.getenv("REDIS_URL") or ''
+QUEUE_NAME: str = os.getenv("QUEUE_NAME") or ''
 MAX_TASKS: int = int(os.getenv("MAX_CONCURRENT_TASKS", "10"))
 MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", 3))
 RECONNECT_DELAY: int = int(os.getenv("RECONNECT_DELAY", "5"))
@@ -53,7 +55,8 @@ db_engine = create_async_engine(db_url,
                                 pool_recycle=3600,
                                 max_overflow=int(os.getenv("PG_POOL_MAX_OVERFLOW", 20)),
                                 pool_timeout=int(os.getenv("PG_POOL_TIMEOUT", 30)),
-                                connect_args={"server_settings": {"search_path": os.getenv("PG_SEARCH_PATH", 'public')}})
+                                connect_args={
+                                    "server_settings": {"search_path": os.getenv("PG_SEARCH_PATH", 'public')}})
 
 redis_engine_client = redis.Redis(
     host=os.getenv("REDIS_HOST", 'localhost'),
@@ -79,12 +82,123 @@ async def save_task_log(task_id: str, message: str):
                 {"tid": task_id, "err": message[:1000]}
             )
             await conn.commit()
-    except Exception as log_e:
+    except (SQLAlchemyError, Exception) as log_e:
         logger.error(f"Ошибка записи лога в БД: {log_e}")
 
 
+def get_root_tag(file_path):
+    """Быстро достает имя корневого тега без парсинга всего файла"""
+    try:
+        context = ET.iterparse(file_path, events=('start',))
+        i, elem = next(context)
+        return elem.tag.split('}')[-1]
+    except Exception as e:
+        logger.error(f"Ошибка чтения XML [{str(e)}]!")
+        return None
+
+
+async def db_process_task_convert_type_01(task: dict[str, Any]):
+    """
+    Задача для конвертации выписок РОСРЕЕСТРА по состоянию на 2026 года
+    :param task:
+    :return:
+    """
+    task_id: str | None = task.get('id')
+    if not task_id:
+        logger.error(f"Получена задача без ID [{str(task)}]")
+        return
+
+    payload = task.get('payload', {})
+    xml_path: str = payload.get('file_path')
+
+    try:
+        tag: Any = get_root_tag(xml_path)
+
+        ALLOWED_TAGS = [
+            'extract_base_params_land',
+            'extract_base_params_build',
+            'extract_base_params_room',
+            'extract_base_params_construction'
+        ]
+
+        if tag in ALLOWED_TAGS:
+            logger.info(f"Обработка {os.path.basename(xml_path)} (Тип: {tag})...")
+            loop = asyncio.get_event_loop()
+            parsed_items = await loop.run_in_executor(None, parse_rosreestr_xml, xml_path, tag)
+
+            payload['parsed_data'] = parsed_items
+            payload['xml_type'] = tag
+        else:
+            payload['parsed_data'] = {}
+            payload['xml_type'] = 'Unknow'
+
+
+    except Exception as e:
+        logger.error(f"Parsing error for task {task_id}: {e}")
+        await save_task_log(task_id, f"Parsing error: {e}")
+        return
+
+    async with async_semaphore:
+        r = redis_engine_client
+        retry_key = f"{RETRY_COUNT_DB_ID}:{task_id}"
+        attempt = int(await r.get(f"{RETRY_COUNT_DB_ID}:{task_id}") or 1)
+
+        try:
+            async with db_engine.connect() as conn:
+                result = await conn.execute(
+                    text("select rs.f_get_test(:json_in)"), {"json_in": json.dumps(payload)}
+                )
+                summary = result.scalar()
+                await conn.commit()
+
+                summary |= {
+                    'status': 'completed'
+                }
+
+            await r.set(f"status:{task_id}", json.dumps(summary), ex=3600)
+            await r.delete(retry_key)
+
+            logger.info(f"{logger.name} {task_id} done")
+            await save_task_log(task_id, f"{logger.name} {task_id} done")
+
+        except (RedisError, SQLAlchemyError, Exception) as e:
+            if attempt < MAX_RETRIES:
+                # 1. Считаем базовую экспоненту: 2, 4, 8, 16...
+                base_backoff = RETRY_SLEEP * (2 ** (attempt - 1))
+
+                # 2. Ограничиваем сверху (Cap), чтобы не ждать вечность
+                capped_backoff = min(base_backoff, MAX_RETRIES)
+
+                # 3. Добавляем Jitter (от 0% до 30% от текущей задержки)
+                jitter = capped_backoff * 0.3 * random.random()
+
+                final_delay = capped_backoff + jitter
+
+                logger.warning(
+                    f"Task {task_id} failed (attempt {attempt}). "
+                    f"Retrying in {final_delay:.2f}s (backoff: {base_backoff:.2f} + jitter: {jitter:.2f}). "
+                    f"Error: {e}"
+                )
+
+                await r.set(f"{RETRY_COUNT_DB_ID}:{task_id}", attempt + 1, ex=3600)
+                await asyncio.sleep(base_backoff)
+                await r.lpush(QUEUE_NAME, json.dumps(task))
+            else:
+                await r.set(f"status:{task_id}", "failed", ex=3600)
+                if not isinstance(e, SQLAlchemyError):
+                    await save_task_log(task_id, e)
+        finally:
+            if os.path.exists('local_filename'):
+                os.remove('local_filename')
+
+
 async def db_process_task(task: dict[str, Any]):
-    task_id = task.get('id')
+    """
+
+    :param task:
+    :return:
+    """
+    task_id: str | None = task.get('id')
     if not task_id:
         logger.error(f"Получена задача без ID [{str(task)}]")
         return
@@ -140,7 +254,6 @@ async def db_process_task(task: dict[str, Any]):
                 if not isinstance(e, SQLAlchemyError):
                     await save_task_log(task_id, e)
         finally:
-
             if os.path.exists('local_filename'):
                 os.remove('local_filename')
 
@@ -160,7 +273,8 @@ async def main():
 
                     if action == 'send':
                         asyncio.create_task(db_process_task(task))
-
+                    elif action == 'convert_type_01':
+                        asyncio.create_task(db_process_task_convert_type_01(task))
 
 
             except (ConnectionError, TimeoutError, RedisError) as e:
