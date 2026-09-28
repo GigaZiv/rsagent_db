@@ -3,14 +3,25 @@ services:
     build: .
     container_name: rs_agent_db
     env_file:
-      .env
+      - .env
     healthcheck:
-      test: [ "CMD", "python", "health_check.py" ]
+      test: ["CMD", "python", "health_check.py"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
     volumes:
       - ./logs:/rsagent_db/logs
+      - shared_media:/app/media
     restart: always
     network_mode: "host"
+    stop_grace_period: 45s
+
+volumes:
+  shared_media:
+
+
+
+#    mkdir logs
+#    chmod 777 logs # или chown 999:999 logs
+#    docker-compose up -d --build

@@ -21,21 +21,18 @@ redis_engine_client = redis.Redis(
 async def over_test():
     print("--- Start seeding test tasks ---")
     try:
-        for idx in range(1, 9):  # Отправим 5 задач
+        for idx in range(1, 2):
             task_id = str(uuid.uuid4())
             task_data = {
-                "id": task_id,
-                "type": "send",
-                "check": True,
-                "lindb": True,
                 "payload": {
-                    "phones": f"7912835598{idx}",
-                    "message": f"Test message #{idx} for ID {task_id[:8]}"
+                    "id": "88518aa7-a6a8-44eb-a356-fde3bf03887e",
+                    "user_id": 2,
+                    "action": "convert_type_01",
+                    "file_path": f"test/report1.xml"
                 }
             }
 
-            # Пишем в очередь
-            await redis_engine_client.rpush('task_queue_sms', json.dumps(task_data))
+            await redis_engine_client.rpush(f'rs:agent:taskdb', json.dumps(task_data))
             print(f"Task {idx} added: {task_id}")
 
     except Exception as e:

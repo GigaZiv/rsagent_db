@@ -2,56 +2,15 @@
     Универсальный парсер
     Версия 2.0.0
 """
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List
 
+from convertors.rs_cnv_parser import XmlParser
 from utils.rs_logger import get_logger
 
 logger = get_logger("RSConvertor")
-
-
-class XmlParser:
-    __slots__ = ()
-
-    @staticmethod
-    def get_find(node, path=None):
-        return node.find(path) if node is not None else None
-
-    @staticmethod
-    def get_find_all(node, path=None):
-        if node is None or path is None:
-            return []
-        return node.findall(path)
-
-    @staticmethod
-    def get_attrib(node, path=None, default=None):
-        if default is None:
-            default = {}
-        if node is None:
-            return default
-
-        found = node if path is None else node.find(path)
-        if found is None:
-            return default
-
-        attrib = found.attrib
-        if not attrib:
-            return {}
-
-        return {k.split('}')[-1]: v for k, v in attrib.items()}
-
-    @staticmethod
-    def get_text(node, path=None, default=''):
-        if node is None:
-            return default
-
-        found = node if path is None else node.find(path)
-        if found is None:
-            return default
-
-        text = found.text
-        return text.strip() if text else default
 
 
 parse = XmlParser()
@@ -92,7 +51,7 @@ def parse_rosreestr_xml(file_path: str, tag: str) -> dict[str, Any]:
     attr_root = parse.get_attrib(root)
     item = {
         'extract_base_type': tag,
-        'guid': attr_root.get('guid'),
+        'guid': attr_root.get('guid') or str(uuid.uuid4()),
         'qr': attr_root.get('qr'),
         'recipient_statement': parse.get_text(root, "./recipient_statement"),
         'status': parse.get_text(root, "./status"),
