@@ -1,5 +1,8 @@
 """
-    Версия 2.6
+    Версия 2.6.2
+
+    Смотрим логи в Docker
+    docker-compose logs -f agent
 """
 import logging
 import os
@@ -24,15 +27,13 @@ def get_logger(name="AgentLogger"):
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # 2. Надежный путь: читаем из ENV, либо берем путь относительно текущего файла
-    # Замените .parent на .parent.parent при необходимости, чтобы выйти в корень проекта
     default_log_dir = Path(__file__).resolve().parent / "logs"
     log_dir_env = os.getenv("LOG_DIR", str(default_log_dir))
     log_dir = Path(log_dir_env)
 
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "rlog.log"
+        log_file = log_dir / f"rlog_{CONTAINER_ID}.log"
 
         file_handler = RotatingFileHandler(
             log_file,

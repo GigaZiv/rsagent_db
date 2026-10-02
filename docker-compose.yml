@@ -1,9 +1,15 @@
 services:
   agent:
     build: .
+    # Если реплика удаляем container_name: rs_agent_db
     container_name: rs_agent_db
     env_file:
       - .env
+# Добавляем блок deploy
+#    deploy:
+#      mode: replicated
+#      replicas: ${REPLICAS:-3} # Запустит 3 по умолчанию, если в .env нет REPLICAS
+
     healthcheck:
       test: ["CMD", "python", "health_check.py"]
       interval: 15s

@@ -79,7 +79,7 @@ async def save_task_log(payload):
     result_payload = {
         k: v for k, v in {
             "id": payload.get('id'),
-            "user_id": payload.get('user_id'),
+            "link_user_id": payload.get('link_user_id'),
             "task_status": payload.get('task_status'),
             "task_progress": payload.get('task_progress'),
             "task_message": payload.get('task_message'),
@@ -87,23 +87,69 @@ async def save_task_log(payload):
         }.items() if v is not None
     }
     """
-    try:
-        task_status=payload.get('task_status')
-        task_progress=payload.get('task_progress')
-        task_message=payload.get('task_message')
-        task_error_message=payload.get('task_error_message')
+    task_status = payload.get('task_status')
+    task_progress = payload.get('task_progress')
+    task_message = payload.get('task_message')
+    task_error_message = payload.get('task_error_message')
 
-        inData = {
-            "payload": {
-                "id": payload.get('id'),
-                "task_user_id": payload.get('user_id'),
-                **({"task_status": task_status} if task_status is not None else {}),
-                **({"task_progress": task_progress} if task_progress is not None else {}),
-                **({"task_message": task_message} if task_message is not None else {}),
-                **({"task_error_message": task_error_message} if task_error_message is not None else {})
-            }
+    await executeDbFunction('rs.set_taskdb_log', {
+        "payload": {
+            "id": payload.get('id'),
+            "task_user_id": payload.get('link_user_id'),
+            **({"task_status": task_status} if task_status is not None else {}),
+            **({"task_progress": task_progress} if task_progress is not None else {}),
+            **({"task_message": task_message} if task_message is not None else {}),
+            **({"task_error_message": task_error_message} if task_error_message is not None else {})
         }
-        await executeFunction('rs.set_taskdb_log', inData)
+    })
+
+
+def get_root_tag(task_file):
+    """Быстро достает имя корневого тега без парсинга всего файла"""
+    try:
+        context = ET.iterparse(task_file, events=('start',))
+        i, elem = next(context)
+        return elem.tag.split('}')[-1]
+    except Exception as e:
+        logger.error(f"Ошибка чтения XML [{str(e)}]!")
+        return None
+
+
+async def executeDbFunction(db_function: str | None, query: dict[str, Any] | None) -> dict[str, Any] | str | None:
+    try:
+        if not db_function:
+            return None
+
+        if not query:
+            return None
+
+        if "." in db_function:
+            schema, func_name = db_function.split(".", 1)
+            safe_func = sql.Identifier(schema, func_name)
+        else:
+            safe_func = sql.Identifier(db_function)
+        safe_query = sql.SQL("SELECT {}(%s::jsonb);").format(safe_func)
+        params = [json.dumps(query)]
+
+        async with db_pool.connection() as conn:
+            cursor = await conn.execute(safe_query, params)
+            row = await cursor.fetchone()
+
+            if row:
+                if isinstance(row, dict):
+                    result = list(row.values())[0]
+                else:
+                    result = row[0]
+
+                if isinstance(result, str):
+                    try:
+                        return json.loads(result)
+                    except json.JSONDecodeError:
+                        return result
+
+                return result
+
+            return None
     except DatabaseError as db_error:
         pg_exception = db_error.__cause__
         pg_diag = getattr(pg_exception, 'diag', None)
@@ -119,45 +165,12 @@ async def save_task_log(payload):
             err_detail = ""
             err_hint = ""
 
-        # f"PG_QUERY: {json.dumps(query)}" \
-        error_result = f"Ошибка функции call_pg_function_async: {err_msg}, RETURNED_SQLSTATE: {err_state}, PG_EXCEPTION_DETAIL: {err_detail}, PG_EXCEPTION_HINT: {err_hint}"
+        error_result = (f"Ошибка функции call_pg_function_async: {err_msg}, "
+                        f"RETURNED_SQLSTATE: {err_state}, "
+                        f"PG_EXCEPTION_DETAIL: {err_detail}, "
+                        f"PG_EXCEPTION_HINT: {err_hint}")
 
         logger.error(error_result, exc_info=True)
-
-
-def get_root_tag(file_path):
-    """Быстро достает имя корневого тега без парсинга всего файла"""
-    try:
-        context = ET.iterparse(file_path, events=('start',))
-        i, elem = next(context)
-        return elem.tag.split('}')[-1]
-    except Exception as e:
-        logger.error(f"Ошибка чтения XML [{str(e)}]!")
-        return None
-
-
-async def executeFunction(db_function, query):
-    if "." in db_function:
-        schema, func_name = db_function.split(".", 1)
-        safe_func = sql.Identifier(schema, func_name)
-    else:
-        safe_func = sql.Identifier(db_function)
-    safe_query = sql.SQL("SELECT {}(%s::jsonb);").format(safe_func)
-    params = [json.dumps(query)]
-
-    async with db_pool.connection() as conn:
-        cursor = await conn.execute(safe_query, params)
-        result = await cursor.fetchone()
-        if result:
-            if isinstance(result, str):
-                try:
-                    return json.loads(result)
-                except json.JSONDecodeError:
-                    return result
-
-            return result
-
-        return None
 
 
 async def db_process_task_convert_type_01(task: dict[str, Any]):
@@ -171,19 +184,38 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
         logger.error(f"Получена задача без ID [{str(task)}]")
         return
 
-    user_id: str | None = task.get('payload', {}).get('user_id')
-    if not user_id:
-        logger.error(f"Получена задача без User [{str(task)}]")
+    link_user_id: str | None = task.get('payload', {}).get('link_user_id')
+    if not link_user_id:
+        logger.error(f"Получена задача без User ID [{str(task)}]")
         return
 
-    payload = task.get('payload', {})
+    task_prc: str | None = task.get('payload', {}).get("task_prc")
+    if not task_prc:
+        logger.error(f"Не определена процедура обработки для [{str(task)}]!")
+        return
 
-    try:
-        xml_path: str | None = payload.get('file_path')
-        if not xml_path:
+    batch_task_id: str | None = task.get('payload', {}).get("batch_task_id")
+    batch_task_prc: str | None = task.get('payload', {}).get("batch_task_prc")
+    batch_task_query: dict[str, Any] | None = task.get('payload', {}).get("batch_task_query")
+
+
+    if batch_task_id:
+        if batch_task_prc is None or batch_task_query is None:
+            logger.error(f"Получена задача без конечной процедуры или параметров с ID счетчика [{str(batch_task_id)}]")
             return
 
-        tag = await asyncio.to_thread(get_root_tag, xml_path)
+    payload: dict[str, Any] = task.get('payload', {})
+
+    try:
+        xml_file_path: str | None = payload.get('task_file', {}).get('task_file_path')
+        if not xml_file_path:
+            return
+
+        xml_file_name: str | None = payload.get('task_file', {}).get('task_file_name')
+        if not xml_file_name:
+            pass
+
+        tag = await asyncio.to_thread(get_root_tag, xml_file_path)
 
         ALLOWED_TAGS = [
             'extract_base_params_land',
@@ -193,8 +225,8 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
         ]
 
         if tag in ALLOWED_TAGS:
-            logger.info(f"Обработка {os.path.basename(xml_path)} (Тип: {tag})...")
-            parsed_items = await asyncio.to_thread(parse_rosreestr_xml, xml_path, tag)
+            logger.info(f"Обработка {os.path.basename(xml_file_path)} (Тип: {tag})...")
+            parsed_items = await asyncio.to_thread(parse_rosreestr_xml, xml_file_path, tag)
 
             payload['parsed_data'] = parsed_items
             payload['xml_type'] = tag
@@ -207,7 +239,7 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
         logger.error(f"Parsing error for task {task_id}: {e}")
         await save_task_log({
             "id": task_id,
-            "user_id": user_id,
+            "link_user_id": link_user_id,
             "task_status": "FAILED",
             "task_error_message": str(e)
         })
@@ -219,30 +251,31 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
         attempt = int(await r.get(f"{RETRY_COUNT_DB_ID}:{task_id}") or 1)
 
         try:
-            result = await executeFunction('rs.set_task_data_flow', payload)
+            logger.info(f"Процедура {task_prc} с ID {task_id} для {os.path.basename(xml_file_path)} запущена!")
 
-            await r.set(f"rs:agent:taskdb:{task_id}", json.dumps({'status': 'COMPLETED'}), ex=3600)
+            result = await executeDbFunction(task_prc, payload)
+            if result:
+                logger.info(
+                    f"Результат процедуры {task_prc} с ID {task_id} для {os.path.basename(xml_file_path)} записан в Лог!")
+
+                # await save_task_log({
+                #     "id": task_id,
+                #     "link_user_id": link_user_id,
+                #     "task_status": "COMPLETED",
+                #     "task_message": 'ok'
+                # })
+
+            await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'COMPLETED'}), ex=3600)
             await r.delete(retry_key)
 
-            logger.info(f"{logger.name} {task_id} done")
-            await save_task_log({
-                "id": task_id,
-                "user_id": user_id,
-                "task_status": "COMPLETED",
-                "task_message": 'ok'
-            })
+            logger.info(f"Процедура {task_prc} с ID {task_id} завершена!")
+
 
         except (RedisError, DatabaseError, Exception) as e:
             if attempt < MAX_RETRIES:
-                # 1. Считаем базовую экспоненту: 2, 4, 8, 16...
                 base_backoff = RETRY_SLEEP * (2 ** (attempt - 1))
-
-                # 2. Ограничиваем сверху (Cap), чтобы не ждать вечность
                 capped_backoff = min(base_backoff, MAX_RETRIES)
-
-                # 3. Добавляем Jitter (от 0% до 30% от текущей задержки)
                 jitter = capped_backoff * 0.3 * random.random()
-
                 final_delay = capped_backoff + jitter
 
                 logger.warning(
@@ -259,11 +292,29 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
                 if not isinstance(e, DatabaseError):
                     await save_task_log({
                         "id": task_id,
-                        "user_id": user_id,
+                        "link_user_id": link_user_id,
                         "task_status": "FAILED",
                         "task_error_message": str(e)
                     })
         finally:
+            if batch_task_id:
+                remaining = await r.decr(f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending")
+                if remaining == 0:
+                    logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} запущена!")
+                    await r.delete(f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending")
+
+                    result = await executeDbFunction(batch_task_prc, batch_task_query)
+                    if result:
+                        if isinstance(result, dict):
+                            if result.get('error', 1) == 0:
+                                if result.get('payload'):
+                                    await r.xadd(name=f"rs:push:user_{link_user_id}",
+                                                 fields={'payload': json.dumps(result.get('payload'))},
+                                                 maxlen=50,
+                                                 approximate=True)
+
+
+                    logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} завершена!")
             if os.path.exists('local_filename'):
                 os.remove('local_filename')
 
@@ -279,8 +330,8 @@ async def db_process_task(task: dict[str, Any]):
         logger.error(f"Получена задача без ID [{str(task)}]")
         return
 
-    user_id: str | None = task.get('payload', {}).get('user_id')
-    if not user_id:
+    link_user_id: str | None = task.get('payload', {}).get('link_user_id')
+    if not link_user_id:
         logger.error(f"Получена задача без User [{str(task)}]")
         return
 
@@ -292,7 +343,7 @@ async def db_process_task(task: dict[str, Any]):
         attempt = int(await r.get(f"{RETRY_COUNT_DB_ID}:{task_id}") or 1)
 
         try:
-            result = await executeFunction('rs.set_task_data_flow', payload)
+            result = await executeDbFunction('rs.set_task_data_flow', payload)
 
             await r.set(f"rs:agent:taskdb:{task_id}", json.dumps({'status': 'COMPLETED'}), ex=3600)
             await r.delete(retry_key)
@@ -300,7 +351,7 @@ async def db_process_task(task: dict[str, Any]):
             logger.info(f"{logger.name} {task_id} done")
             await save_task_log({
                 "id": task_id,
-                "user_id": user_id,
+                "link_user_id": link_user_id,
                 "task_status": "COMPLETED",
                 "task_message": result
             })
@@ -332,7 +383,7 @@ async def db_process_task(task: dict[str, Any]):
                 if not isinstance(e, DatabaseError):
                     await save_task_log({
                         "id": task_id,
-                        "user_id": user_id,
+                        "link_user_id": link_user_id,
                         "task_status": "FAILED",
                         "task_error_message": str(e)
                     })
