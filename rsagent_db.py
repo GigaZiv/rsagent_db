@@ -35,6 +35,8 @@ MAX_TASKS: int = int(os.getenv("MAX_CONCURRENT_TASKS", "10"))
 MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", 3))
 RECONNECT_DELAY: int = int(os.getenv("RECONNECT_DELAY", "5"))
 
+DEBUG: bool = rs_settings.get_bool("DEBUG", False)
+
 REDIS_SUBSCRIBE_BPROP_TIMEOUT: int = int(os.getenv("REDIS_SUBSCRIBE_BPROP_TIMEOUT", 2))
 RETRY_COUNT_DB_ID: str = "rs:agent:taskdb:retry"
 RETRY_SLEEP: int = int(os.getenv("RETRY_SLEEP", 3))
@@ -76,33 +78,8 @@ redis_engine_client = redis.Redis(
 async def save_task_log(payload):
     """
     Отдельная функция для записи логов в БД
-    result_payload = {
-        k: v for k, v in {
-            "id": payload.get('id'),
-            "link_user_id": payload.get('link_user_id'),
-            "task_status": payload.get('task_status'),
-            "task_progress": payload.get('task_progress'),
-            "task_message": payload.get('task_message'),
-            "task_error_message": payload.get('task_error_message')
-        }.items() if v is not None
-    }
     """
-    task_status = payload.get('task_status')
-    task_progress = payload.get('task_progress')
-    task_message = payload.get('task_message')
-    task_error_message = payload.get('task_error_message')
-
-    await executeDbFunction('rs.set_taskdb_log', {
-        "payload": {
-            "id": payload.get('id'),
-            "task_user_id": payload.get('link_user_id'),
-            **({"task_status": task_status} if task_status is not None else {}),
-            **({"task_progress": task_progress} if task_progress is not None else {}),
-            **({"task_message": task_message} if task_message is not None else {}),
-            **({"task_error_message": task_error_message} if task_error_message is not None else {})
-        }
-    })
-
+    await executeDbFunction('rs.set_taskdb_log',  payload)
 
 def get_root_tag(task_file):
     """Быстро достает имя корневого тега без парсинга всего файла"""
@@ -197,6 +174,7 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
     batch_task_id: str | None = task.get('payload', {}).get("batch_task_id")
     batch_task_prc: str | None = task.get('payload', {}).get("batch_task_prc")
     batch_task_query: dict[str, Any] | None = task.get('payload', {}).get("batch_task_query")
+    batch_task_after: dict[str, Any] | None = task.get('payload', {}).get("batch_task_after")
 
 
     if batch_task_id:
@@ -298,8 +276,8 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
                     })
         finally:
             if batch_task_id:
-                remaining = await r.decr(f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending")
-                if remaining == 0:
+                remaining: int = await r.decr(f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending")
+                if remaining == 0 and batch_task_prc is not None and batch_task_query is not None:
                     logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} запущена!")
                     await r.delete(f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending")
 
@@ -312,9 +290,15 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
                                                  fields={'payload': json.dumps(result.get('payload'))},
                                                  maxlen=50,
                                                  approximate=True)
-
-
                     logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} завершена!")
+
+                elif remaining == 0 and batch_task_prc is None and batch_task_query is None and batch_task_after is not None:
+                    await r.xadd(name=f"rs:push:user_{link_user_id}",
+                                 fields={'payload': json.dumps(batch_task_after)},
+                                 maxlen=50,
+                                 approximate=True)
+                    logger.info(f"Финальная обработка id {batch_task_id} завершена!")
+
             if os.path.exists('local_filename'):
                 os.remove('local_filename')
 
@@ -358,13 +342,8 @@ async def db_process_task(task: dict[str, Any]):
 
         except (RedisError, DatabaseError, Exception) as e:
             if attempt < MAX_RETRIES:
-                # 1. Считаем базовую экспоненту: 2, 4, 8, 16...
                 base_backoff = RETRY_SLEEP * (2 ** (attempt - 1))
-
-                # 2. Ограничиваем сверху (Cap), чтобы не ждать вечность
                 capped_backoff = min(base_backoff, MAX_RETRIES)
-
-                # 3. Добавляем Jitter (от 0% до 30% от текущей задержки)
                 jitter = capped_backoff * 0.3 * random.random()
 
                 final_delay = capped_backoff + jitter
@@ -395,8 +374,8 @@ async def db_process_task(task: dict[str, Any]):
 def trigger_stop():
     """Вспомогательная функция для безопасной установки флага остановки."""
     try:
-        loop = asyncio.get_running_loop()
-        loop.call_soon_threadsafe(stop_event.set)
+        loop_trigger = asyncio.get_running_loop()
+        loop_trigger.call_soon_threadsafe(stop_event.set)
     except RuntimeError:
         stop_event.set()
 
@@ -477,7 +456,7 @@ async def main():
         await db_pool.close()
         await r.aclose()
 
-        print(f"{logger.name} {_("all connections are closed")}...")
+        logger.info(f"{logger.name} {_("all connections are closed")}...")
 
 
 if __name__ == '__main__':

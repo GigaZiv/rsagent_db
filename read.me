@@ -1,0 +1,10 @@
+    result_payload = {
+        k: v for k, v in {
+            "id": payload.get('id'),
+            "link_user_id": payload.get('link_user_id'),
+            "task_status": payload.get('task_status'),
+            "task_progress": payload.get('task_progress'),
+            "task_message": payload.get('task_message'),
+            "task_error_message": payload.get('task_error_message')
+        }.items() if v is not None
+    }
