@@ -27,7 +27,7 @@ def get_logger(name="AgentLogger"):
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    default_log_dir = Path(__file__).resolve().parent / "logs"
+    default_log_dir = Path(__file__).resolve().parent.parent / "logs"
     log_dir_env = os.getenv("LOG_DIR", str(default_log_dir))
     log_dir = Path(log_dir_env)
 

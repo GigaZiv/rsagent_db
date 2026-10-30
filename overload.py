@@ -27,8 +27,11 @@ async def over_test():
                 "payload": {
                     "id": task_id,
                     "action": "convert_type_01",
+                    "task_prc": "rs.load_cpt_01_directory",
                     "link_user_id": 2,
-                    "task_file": f"test/report1.xml"
+                    "task_file": {
+                        "task_file_path": "test/report2.xml"
+                    }
                 }
             }
 

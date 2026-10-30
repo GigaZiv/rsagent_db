@@ -29,7 +29,7 @@ RUN useradd -m -r agentuser && \
 
 COPY --chown=agentuser:agentuser utils/ /rsagent_db/utils/
 COPY --chown=agentuser:agentuser convertors/ /rsagent_db/convertors/
-COPY --chown=agentuser:agentuser rsagent_db.py .
+COPY --chown=agentuser:agentuser rsagent_task.py .
 COPY --chown=agentuser:agentuser health_check.py .
 
 USER agentuser

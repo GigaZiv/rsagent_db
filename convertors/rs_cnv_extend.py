@@ -7,6 +7,7 @@
 """
 from datetime import datetime
 
+
 def to_date(date_str):
     """"""
     if not date_str:

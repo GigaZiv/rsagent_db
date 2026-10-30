@@ -2,30 +2,17 @@
     Универсальный парсер
     Версия 2.0.0
 """
+import datetime
 import uuid
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from convertors.rs_cnv_parser import XmlParser
 from utils.rs_logger import get_logger
 
 logger = get_logger("RSConvertor")
 
-
 parse = XmlParser()
-
-
-def process_folder(folder_path) -> List[Dict[str, Any]]:
-    """"""
-    results = []
-
-    path = Path(folder_path)
-    for file in path.glob('*.xml'):
-        out_dict = parse_rosreestr_xml(str(file))
-        if out_dict:
-            results.append(out_dict)
-    return results
 
 
 def parse_rosreestr_xml(file_path: str, tag: str) -> dict[str, Any]:
@@ -279,3 +266,89 @@ def parse_rosreestr_xml(file_path: str, tag: str) -> dict[str, Any]:
         item |= {'right_record': right_record_raw}
 
     return item
+
+
+def parse_cbr_bik_xml(xml_text: str) -> dict[str, Any]:
+    """Парсит XML справочника БИК ЦБ РФ (формат ED807) в словарь для JSONB."""
+    try:
+        root = ET.fromstring(xml_text)
+
+    except StopIteration as e:
+        logger.error("Ошибка: XML-файл абсолютно пустой")
+        return {'error': str(e)}
+
+    except (ET.ParseError, UnicodeDecodeError) as e:
+        print(f"Ошибка синтаксиса или кодировки XML: {e}")
+        return {'error': str(e)}
+
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка: {e}")
+        return {'error': str(e)}
+
+    ed_date = root.attrib.get("EDDate") or datetime.date.today().isoformat()
+
+    items: list[dict[str, Any]] = []
+
+    for entry in root:
+        if parse.del_strip_ns(entry.tag) != "BICDirectoryEntry":
+            continue
+
+        bic = entry.attrib.get("BIC")
+        if not bic:
+            continue
+
+        participant_info: dict[str, Any] = {}
+        accounts: list[dict[str, Any]] = []
+
+        for child in entry:
+            tag_name = parse.del_strip_ns(child.tag)
+
+            if tag_name == "ParticipantInfo":
+                a = child.attrib
+                participant_info = {
+                    "name_p": a.get("NameP", ""),
+                    "engl_name": a.get("EnglName", ""),
+                    "reg_n": a.get("RegN", ""),
+                    "cntr_cd": a.get("CntrCd", ""),
+                    "rgn": a.get("Rgn", ""),
+                    "ind": a.get("Ind", ""),
+                    "tnp": a.get("Tnp", ""),
+                    "nnp": a.get("Nnp", ""),
+                    "adr": a.get("Adr", ""),
+                    "prnt_bic": a.get("PrntBIC", ""),
+                    "date_in": a.get("DateIn", ""),
+                    "pt_type": a.get("PtType", ""),
+                    "srvcs": a.get("Srvcs", ""),
+                    "xch_type": a.get("XchType", ""),
+                    "uid": a.get("UID", ""),
+                    "participant_status": a.get("ParticipantStatus", "")
+                }
+
+            elif tag_name == "Accounts":
+                a = child.attrib
+                accounts.append({
+                    "account": a.get("Account", ""),
+                    "regulation_account_type": a.get("RegulationAccountType", ""),
+                    "ck": a.get("CK", ""),
+                    "account_cbr_bic": a.get("AccountCBRBIC", ""),
+                    "date_in": a.get("DateIn", ""),
+                    "account_status": a.get("AccountStatus", "")
+                })
+
+        items.append({
+            "bic": bic,
+            **participant_info,
+            "accounts": accounts
+        })
+
+    return {
+        "ed_date": ed_date,
+        "count": len(items),
+        "items": items
+    }
+
+
+RS_PARSERS = {
+    "parse_rosreestr": parse_rosreestr_xml,
+    "parse_cbr_bik": parse_cbr_bik_xml,
+}

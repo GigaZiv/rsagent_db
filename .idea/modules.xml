@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/rsagent_db.iml" filepath="$PROJECT_DIR$/.idea/rsagent_db.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/rsagent_task.iml" filepath="$PROJECT_DIR$/.idea/rsagent_task.iml" />
     </modules>
   </component>
 </project>
