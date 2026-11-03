@@ -1,9 +1,14 @@
 """
-RPUSH task_queue '{"A":"A", "id": "f286645d-21ab-4a73-8b42-6cebbf866658", "payload": {"a": 1}}'
-"""
+    Версия 2.5.0
 
+    Copyright (c) 2026 ООО "РС-Автоматизация" ИНН 7203457349. Все права защищены.
+
+    Данный исходный код является конфиденциальным и принадлежит ООО "РС-Автоматизация".
+    Любое копирование, распространение, модификация или использование
+    данного кода, полностью или частично, строго запрещено без
+    предварительного письменного разрешения правообладателя.
+"""
 import asyncio
-import datetime
 import json
 import os
 import random
@@ -163,50 +168,112 @@ async def execute_db_function(db_function: str | None, payload: dict[str, Any] |
 
 
 async def finalize_batch_and_cleanup(
-    batch_task_id: str | None,
-    batch_task_prc: str | None,
-    batch_task_query: dict[str, Any] | None,
-    batch_task_after: dict[str, Any] | None,
-    link_user_id: str,
-    xml_file_path: str | None
+        batch_task_id: str | None,
+        batch_task_prc: str | None,
+        batch_task_query: dict[str, Any] | None,
+        batch_task_after: dict[str, Any] | None,
+        link_user_id: str,
+        xml_file_path: str | None,
+        task_id: str | None = None,
+        task_result: dict[str, Any] | str | None = None,
+        task_status: str = "SUCCESS"
 ):
-    """Выполняет уменьшение счетчика батча и удаление временного файла только при полном завершении задачи"""
+    """
+    Отправляет SSE-прогресс по каждому файлу, финализирует батч и удаляет временный файл.
+    {
+      "event": "batch_file_progress",
+      "batch_task_id": "batch_991",
+      "task_id": "f47ac10b-58cc...",
+      "status": "SUCCESS",
+      "remaining": 3,
+      "completed": 7,
+      "total": 10,
+      "percent": 70.0
+    }
+    """
+    """Отправляет SSE-прогресс по каждому файлу, финализирует батч и удаляет временный файл."""
     r = redis_engine_client
+    stream_name: str = f"rs:push:user_{link_user_id}"
+    resolved_file_name: str = (os.path.basename(xml_file_path) if xml_file_path else "unknown")
+
     try:
         if batch_task_id:
-            batch_key = f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending"
+            batch_key: str = f"rs:agent:taskdb:tasks:batch:{batch_task_id}:pending"
             remaining: int = await r.decr(batch_key)
+            safe_remaining = max(remaining, 0)
+
+            progress_payload = {
+                **({"action": batch_task_after.get('action')} if batch_task_after.get('action') is not None else {}),
+                "event": "batch_file_progress",
+                "batch_task_id": batch_task_id,
+                "task_id": task_id,
+                "file_name": resolved_file_name,
+                "task_result": task_result,
+                "status": task_status,
+                "remaining": safe_remaining
+            }
+
+            await r.xadd(
+                name=stream_name,
+                fields={"payload": json.dumps(progress_payload, ensure_ascii=False)},
+                maxlen=100,
+                approximate=True
+            )
 
             if remaining <= 0:
                 await r.delete(batch_key)
-
                 if batch_task_prc is not None and batch_task_query is not None:
                     logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} запущена!")
                     result = await execute_db_function(batch_task_prc, batch_task_query)
-                    if isinstance(result, dict) and result.get('error', 1) == 0 and result.get('payload'):
+                    if isinstance(result, dict) and result.get('error', 1) == 0 and result.get('result'):
+                        result_out: dict[str, Any] = {
+                            **({"action": batch_task_after.get('action')} if batch_task_after.get(
+                                'action') is not None else {}),
+                            "event": "batch_result_files_progress",
+                            'result': result.get('result')
+                            }
                         await r.xadd(
-                            name=f"rs:push:user_{link_user_id}",
-                            fields={'payload': json.dumps(result.get('payload'))},
-                            maxlen=50,
+                            name=stream_name,
+                            fields={"payload": json.dumps(result_out, ensure_ascii=False)},
+                            maxlen=100,
                             approximate=True
                         )
                     logger.info(f"Финальная процедура {batch_task_prc} id {batch_task_id} завершена!")
 
                 elif batch_task_prc is None and batch_task_query is None and batch_task_after is not None:
+                    result_out: dict[str, Any] = {**({"action": batch_task_after.get('action')} if batch_task_after.get(
+                        'action') is not None else {}),
+                                                  "event": "batch_files_progress",
+                                                  "batch_task_after": batch_task_after
+                                                  }
                     await r.xadd(
-                        name=f"rs:push:user_{link_user_id}",
-                        fields={'payload': json.dumps(batch_task_after)},
-                        maxlen=50,
+                        name=stream_name,
+                        fields={"payload": json.dumps(result_out, ensure_ascii=False)},
+                        maxlen=100,
                         approximate=True
                     )
                     logger.info(f"Финальная обработка id {batch_task_id} завершена!")
+        else:
+            # Одиночный файл (без batch_task_id)
+            single_payload = {
+                "event": "single_file_completed",
+                "task_id": task_id,
+                "file_name": resolved_file_name,
+                "status": task_status
+            }
+            await r.xadd(
+                name=stream_name,
+                fields={"payload": json.dumps(single_payload, ensure_ascii=False)},
+                maxlen=100,
+                approximate=True
+            )
+
     except Exception as e:
         logger.error(f"Ошибка при финализации батча {batch_task_id}: {e}")
     finally:
         if xml_file_path and os.path.exists(xml_file_path):
             try:
-                pass
-                #os.remove(xml_file_path)
+                os.remove(xml_file_path)
             except OSError as e:
                 logger.warning(f"Не удалось удалить файл {xml_file_path}: {e}")
 
@@ -228,9 +295,37 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
         logger.error(f"Задача пропущена: отсутствуют обязательные поля [{str(task)}]")
         if link_user_id:
             await finalize_batch_and_cleanup(
-                batch_task_id, batch_task_prc, batch_task_query, batch_task_after, link_user_id, xml_file_path
+                batch_task_id, batch_task_prc, batch_task_query, batch_task_after,
+                link_user_id, xml_file_path, task_id, None, "ERROR"
             )
         return
+
+    stream_name: str = f"rs:push:user_{link_user_id}"
+
+    result_db_task: dict[str, Any] | str | None = {}
+
+    r = redis_engine_client
+    await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'PROCESSING'}), ex=3600)
+
+    await asyncio.sleep(10)
+
+    progress_payload = {
+        **({"action": batch_task_after.get('action')} if batch_task_after.get('action') is not None else {}),
+        "event": "batch_file_prcessing",
+        "batch_task_id": batch_task_id,
+        "task_id": task_id,
+        "file_name": xml_file_path,
+        "status": 'PROCESSING'
+    }
+
+    await r.xadd(
+        name=stream_name,
+        fields={"payload": json.dumps(progress_payload, ensure_ascii=False)},
+        maxlen=100,
+        approximate=True
+    )
+
+    await asyncio.sleep(10)
 
     try:
         tag = await asyncio.to_thread(get_root_tag, xml_file_path)
@@ -254,41 +349,36 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
 
     except Exception as e:
         logger.error(f"Parsing error for task {task_id}: {e}")
+        await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'ERROR'}), ex=3600)
         await save_task_log({
             "id": task_id,
             "link_user_id": link_user_id,
-            "task_status": "FAILED",
+            "task_status": "ERROR",
             "task_error_message": str(e)
         })
         await finalize_batch_and_cleanup(
-            batch_task_id, batch_task_prc, batch_task_query, batch_task_after, link_user_id, xml_file_path
+            batch_task_id, batch_task_prc, batch_task_query, batch_task_after,
+            link_user_id, xml_file_path, task_id, None, "ERROR"
         )
         return
 
-    r = redis_engine_client
     retry_key = f"{RETRY_COUNT_DB_ID}:{task_id}"
     attempt = int(await r.get(retry_key) or 1)
     is_retrying = False
+    task_status = "ERROR"
 
     try:
         logger.info(f"Процедура {task_prc} с ID {task_id} для {os.path.basename(xml_file_path)} запущена!")
 
-        # file_path = 'task02.json'
-        # with open(file_path, 'w', encoding='utf-8') as f:
-        #     json.dump(
-        #         payload,
-        #         f,
-        #         ensure_ascii=False,  # Обязательно False, чтобы сохранить русский текст
-        #         indent=4  # Делает красивые отступы
-        #    )
-
-        result = await execute_db_function(task_prc, payload)
-        if result:
+        result_db_task = await execute_db_function(task_prc, payload)
+        if result_db_task:
             logger.info(f"Результат процедуры {task_prc} с ID {task_id} получен!")
 
-        await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'COMPLETED'}), ex=3600)
-        await r.delete(retry_key)
+            task_status = "SUCCESS" if isinstance(result_db_task, dict) and result_db_task.get('error',
+                                                                                               1) == 0 else 'ERROR'
+            await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': task_status}), ex=3600)
 
+        await r.delete(retry_key)
         logger.info(f"Процедура {task_prc} с ID {task_id} завершена!")
 
     except (RedisError, DatabaseError, Exception) as e:
@@ -305,23 +395,24 @@ async def db_process_task_convert_type_01(task: dict[str, Any]):
                 f"Error: {e}"
             )
 
-            # Отправляем задачу на повтор в фоне, не блокируя семафор и не удаляя XML-файл
+            # Очищаем распарсенные данные перед возвратом в очередь, чтобы не гонять мегабайты в Redis
+            payload.pop('parsed_data', None)
             asyncio.create_task(delayed_requeue(task, final_delay, retry_key, attempt))
         else:
-            await r.set(f"rs:agent:taskdb:{task_id}", "failed", ex=3600)
+            await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'ERROR'}), ex=3600)
             await r.delete(retry_key)
             if not isinstance(e, DatabaseError):
                 await save_task_log({
                     "id": task_id,
                     "link_user_id": link_user_id,
-                    "task_status": "FAILED",
+                    "task_status": "ERROR",
                     "task_error_message": str(e)
                 })
     finally:
-        # Финализируем батч и удаляем файл ТОЛЬКО если задача не ушла на повтор!
         if not is_retrying:
             await finalize_batch_and_cleanup(
-                batch_task_id, batch_task_prc, batch_task_query, batch_task_after, link_user_id, xml_file_path
+                batch_task_id, batch_task_prc, batch_task_query, batch_task_after, link_user_id, xml_file_path, task_id,
+                result_db_task, task_status
             )
 
 
@@ -410,7 +501,7 @@ async def main():
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, linux_shutdown_handler)
 
-    #logger.info(f"{_('The agent is running in', lang='ru')} [{datetime.datetime.now()}]...")
+    # logger.info(f"{_('The agent is running in', lang='ru')} [{datetime.datetime.now()}]...")
 
     await db_pool.open()
     logger.info("Подключение к БД установлено.")
