@@ -1,5 +1,6 @@
 """
-
+    2026 Жуков Игорь. All rights reserved. Confidential and proprietary. Do not copy or distribute.
+    Версия 2.0.0
 
     Формат Геометрии: В коде выше я предполагаю, что ваш Python-агент внутри не просто
     трансформирует точки, а собирает их в строку WKT (например, POLYGON((lon1 lat1, lon2 lat2, ...))).

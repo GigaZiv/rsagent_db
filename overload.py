@@ -23,14 +23,25 @@ async def over_test():
     try:
         for idx in range(1, 2):
             task_id = uuid.uuid4().hex
+            # task_data = {
+            #     "payload": {
+            #         "id": task_id,
+            #         "action": "convert_type_01",
+            #         "task_prc": "rs.load_cpt_01_directory",
+            #         "link_user_id": 2,
+            #         "task_file": {
+            #             "task_file_path": "test/report2.xml"
+            #         }
+            #     }
+            # }
             task_data = {
                 "payload": {
                     "id": task_id,
-                    "action": "convert_type_01",
-                    "task_prc": "rs.load_cpt_01_directory",
+                    "action": "ai_01",
+                    "task_prc": "rs.load_ai_01_directory",
                     "link_user_id": 2,
                     "task_file": {
-                        "task_file_path": "test/report2.xml"
+                        "task_file_path": "test/p2.png"
                     }
                 }
             }

@@ -18,10 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev \
     libpq-dev \
     libpq5 \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    fonts-dejavu-core \
     && pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt \
     && apt-get purge -y --auto-remove gcc python3-dev libc6-dev libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/lists/*
 
 RUN useradd -m -r agentuser && \
     mkdir -p /rsagent_db/logs && \

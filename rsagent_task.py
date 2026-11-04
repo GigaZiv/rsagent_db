@@ -24,6 +24,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from redis.exceptions import ConnectionError, RedisError, TimeoutError
 
+from ai.rs_ai_yolo import process_image_yolo
 from convertors.rs_cnv_format import RS_PARSERS
 from utils.rs_env import rs_settings
 from utils.rs_i18n import _
@@ -231,7 +232,7 @@ async def finalize_batch_and_cleanup(
                                 'action') is not None else {}),
                             "event": "batch_result_files_progress",
                             'result': result.get('result')
-                            }
+                        }
                         await r.xadd(
                             name=stream_name,
                             fields={"payload": json.dumps(result_out, ensure_ascii=False)},
@@ -276,6 +277,124 @@ async def finalize_batch_and_cleanup(
                 os.remove(xml_file_path)
             except OSError as e:
                 logger.warning(f"Не удалось удалить файл {xml_file_path}: {e}")
+
+
+async def db_process_task_ai_01(task: dict[str, Any]):
+    """
+    Задача распознавания построек на снимках с помощью YOLO (DJI Mini).
+    """
+    payload: dict[str, Any] = task.get('payload', {})
+    task_id: str | None = payload.get('id')
+    link_user_id: str | None = payload.get('link_user_id')
+    task_prc: str | None = payload.get('task_prc')  # Например, 'rs.set_task_ai_result'
+
+    batch_task_id: str | None = payload.get("batch_task_id")
+    batch_task_prc: str | None = payload.get("batch_task_prc")
+    batch_task_query: dict[str, Any] | None = payload.get("batch_task_query")
+    batch_task_after: dict[str, Any] | None = payload.get("batch_task_after")
+
+    task_meta: dict[str, Any] = payload.get("task_meta") or task.get("task_meta") or {}
+
+    task_file_info: dict[str, Any] = payload.get('task_file', {})
+    image_file_path: str | None = task_file_info.get('task_file_path')
+    image_file_name: str | None = task_file_info.get('task_file_name')
+    delete_source: bool = bool(task_meta.get('delete-source', False))
+
+    if not task_id or not link_user_id or not image_file_path:
+        logger.error(f"AI-задача пропущена: отсутствуют обязательные поля [{str(task)}]")
+        if link_user_id:
+            await finalize_batch_and_cleanup(
+                batch_task_id, batch_task_prc, batch_task_query, batch_task_after,
+                link_user_id, image_file_path if delete_source else None,
+                task_id, None, "ERROR"
+            )
+        return
+
+    r = redis_engine_client
+    await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'PROCESSING'}), ex=3600)
+
+    # 1. Запуск распознавания YOLO в отдельном потоке
+    try:
+        logger.info(f"YOLO распознавание запущено для {os.path.basename(image_file_path)} (ID: {task_id})...")
+        ai_report = await asyncio.to_thread(process_image_yolo, image_file_path, task_meta)
+
+        payload['ai_result'] = ai_report
+        total_found = ai_report['summary']['total_objects']
+        result_img_path = ai_report['image_info']['result_path']
+
+        logger.info(
+            f"YOLO завершил обработку {os.path.basename(image_file_path)}: "
+            f"найдено объектов: {total_found}, сохранено в: {result_img_path}"
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка YOLO для задачи {task_id}: {e}")
+        await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'ERROR'}), ex=3600)
+        await save_task_log({
+            "id": task_id,
+            "link_user_id": link_user_id,
+            "task_status": "ERROR",
+            "task_log": {"error": str(e), "task_meta": task_meta},
+            "task_error_message": str(e)
+        })
+        await finalize_batch_and_cleanup(
+            batch_task_id, batch_task_prc, batch_task_query, batch_task_after,
+            link_user_id, image_file_path if delete_source else None,
+            task_id, image_file_name, "ERROR"
+        )
+        return
+
+    retry_key = f"{RETRY_COUNT_DB_ID}:{task_id}"
+    attempt = int(await r.get(retry_key) or 1)
+    is_retrying = False
+    task_status = "ERROR"
+
+    try:
+        logger.info(f"Процедура {task_prc} с ID {task_id} для {os.path.basename(image_file_path)} запущена!")
+
+        result_db_task = await execute_db_function(task_prc, payload)
+        if result_db_task:
+            logger.info(f"Результат процедуры {task_prc} с ID {task_id} получен!")
+
+            task_status = "SUCCESS" if isinstance(result_db_task, dict) and result_db_task.get('error',
+                                                                                               1) == 0 else 'ERROR'
+            await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': task_status}), ex=3600)
+
+        await r.delete(retry_key)
+        logger.info(f"Процедура {task_prc} с ID {task_id} завершена!")
+
+    except (RedisError, DatabaseError, Exception) as e:
+        if attempt < MAX_RETRIES:
+            is_retrying = True
+            base_backoff = RETRY_SLEEP * (2 ** (attempt - 1))
+            capped_backoff = min(base_backoff, 60)
+            jitter = capped_backoff * 0.3 * random.random()
+            final_delay = capped_backoff + jitter
+
+            logger.warning(
+                f"AI Task {task_id} failed DB save (attempt {attempt}). "
+                f"Retrying in {final_delay:.2f}s. Error: {e}"
+            )
+
+            payload.pop('ai_result', None)
+            asyncio.create_task(delayed_requeue(task, final_delay, retry_key, attempt))
+        else:
+            await r.set(f"rs:agent:taskdb:tasks:task_{task_id}", json.dumps({'status': 'ERROR'}), ex=3600)
+            await r.delete(retry_key)
+            if not isinstance(e, DatabaseError):
+                await save_task_log({
+                    "id": task_id,
+                    "link_user_id": link_user_id,
+                    "task_status": "ERROR",
+                    "task_error_message": str(e)
+                })
+    finally:
+        if not is_retrying:
+            await finalize_batch_and_cleanup(
+                batch_task_id, batch_task_prc, batch_task_query, batch_task_after,
+                link_user_id, image_file_path if delete_source else None,
+                task_id, image_file_name, task_status
+            )
 
 
 async def db_process_task_convert_type_01(task: dict[str, Any]):
@@ -526,6 +645,9 @@ async def main():
                         task_future = asyncio.create_task(db_process_task_convert_type_01(task))
                         task_future.add_done_callback(lambda i: async_semaphore.release())
 
+                    elif action == 'ai_01':
+                        task_future = asyncio.create_task(db_process_task_ai_01(task))
+                        task_future.add_done_callback(lambda i: async_semaphore.release())
                     else:
                         logger.warning(f"Unknown action: {action}")
                         async_semaphore.release()

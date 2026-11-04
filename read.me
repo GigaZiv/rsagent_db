@@ -8,3 +8,37 @@
             "task_error_message": payload.get('task_error_message')
         }.items() if v is not None
     }
+
+    TASK_LOG
+
+    JSON
+{
+  "status": "SUCCESS",
+  "model_version": "v8-nano",
+  "confidence_threshold": 0.75,
+  "inference_time_ms": 142.5,
+  "image_info": {
+    "source_path": "uploads/dji_0042.jpg",
+    "result_path": "processed/results/dji_0042_detected.jpg",
+    "width_px": 4000,
+    "height_px": 3000,
+    "gsd_m_per_px": 0.0175
+  },
+  "summary": {
+    "total_objects": 2,
+    "class_counts": {"building": 2},
+    "total_area_m2": 154.35
+  },
+  "detections": [
+    {
+      "index": 1,
+      "class_id": 0,
+      "class_name": "building",
+      "confidence": 0.9124,
+      "bbox_px": [450.0, 320.0, 980.0, 790.0],
+      "size_px": {"width": 530.0, "height": 470.0},
+      "size_m": {"width": 9.28, "height": 8.23},
+      "area_m2": 76.37
+    }
+  ]
+}

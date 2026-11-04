@@ -1,4 +1,5 @@
+ultralytics==8.4.202
 botocore==1.43.123
-psycopg==3.3.6
+psycopg==3.3.8
 psycopg-pool==3.3.3
 redis==8.1.0

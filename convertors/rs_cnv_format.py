@@ -1,5 +1,5 @@
 """
-    Универсальный парсер
+    2026 Жуков Игорь. All rights reserved. Confidential and proprietary. Do not copy or distribute.
     Версия 2.0.0
 """
 import datetime
